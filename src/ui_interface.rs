@@ -3,10 +3,7 @@ use hbb_common::password_security;
 use hbb_common::{
     allow_err,
     bytes::Bytes,
-    config::{
-        self, keys::*, option2bool, Config, LocalConfig, PeerConfig, CONNECT_TIMEOUT,
-        RENDEZVOUS_PORT,
-    },
+    config::{self, keys::*, Config, LocalConfig, PeerConfig, CONNECT_TIMEOUT, RENDEZVOUS_PORT},
     directories_next,
     futures::future::join_all,
     log,
@@ -23,7 +20,6 @@ use serde_derive::Serialize;
 use std::process::Child;
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicUsize, Ordering},
     sync::{Arc, Mutex},
 };
 
@@ -47,6 +43,8 @@ pub struct UiStatus {
     pub mouse_time: i64,
     #[cfg(not(feature = "flutter"))]
     pub id: String,
+    #[cfg(feature = "flutter")]
+    pub video_conn_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,13 +63,13 @@ lazy_static::lazy_static! {
         mouse_time: 0,
         #[cfg(not(feature = "flutter"))]
         id: "".to_owned(),
+        #[cfg(feature = "flutter")]
+        video_conn_count: 0,
     }));
     static ref ASYNC_JOB_STATUS : Arc<Mutex<String>> = Default::default();
     static ref ASYNC_HTTP_STATUS : Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     static ref TEMPORARY_PASSWD : Arc<Mutex<String>> = Arc::new(Mutex::new("".to_owned()));
 }
-
-pub static VIDEO_CONN_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 lazy_static::lazy_static! {
@@ -173,29 +171,45 @@ pub fn get_option<T: AsRef<str>>(key: T) -> String {
 }
 
 #[inline]
-#[cfg(target_os = "macos")]
 pub fn use_texture_render() -> bool {
-    cfg!(feature = "flutter") && LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) == "Y"
-}
+    #[cfg(target_os = "android")]
+    return false;
+    #[cfg(target_os = "ios")]
+    return false;
 
-#[inline]
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-pub fn use_texture_render() -> bool {
-    cfg!(feature = "flutter") && LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) != "N"
-}
+    #[cfg(target_os = "macos")]
+    return cfg!(feature = "flutter")
+        && LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) == "Y";
 
-#[inline]
-#[cfg(any(target_os = "android", target_os = "ios"))]
-pub fn use_texture_render() -> bool {
-    false
+    #[cfg(target_os = "linux")]
+    return cfg!(feature = "flutter")
+        && LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) != "N";
+
+    #[cfg(target_os = "windows")]
+    {
+        if !cfg!(feature = "flutter") {
+            return false;
+        }
+        // https://learn.microsoft.com/en-us/windows/win32/sysinfo/targeting-your-application-at-windows-8-1
+        #[cfg(debug_assertions)]
+        let default_texture = true;
+        #[cfg(not(debug_assertions))]
+        let default_texture = crate::platform::is_win_10_or_greater();
+        if default_texture {
+            LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) != "N"
+        } else {
+            return LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) == "Y";
+        }
+    }
 }
 
 #[inline]
 pub fn get_local_option(key: String) -> String {
-    LocalConfig::get_option(&key)
+    crate::get_local_option(&key)
 }
 
 #[inline]
+#[cfg(feature = "flutter")]
 pub fn get_hard_option(key: String) -> String {
     config::HARD_SETTINGS
         .read()
@@ -412,7 +426,10 @@ pub fn set_option(key: String, value: String) {
         ipc::set_options(options.clone()).ok();
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    Config::set_option(key, value);
+    {
+        let _nat = crate::CheckTestNatType::new();
+        Config::set_option(key, value);
+    }
 }
 
 #[inline]
@@ -462,18 +479,19 @@ pub fn set_socks(proxy: String, username: String, password: String) {
     ipc::set_socks(socks).ok();
     #[cfg(target_os = "android")]
     {
+        let _nat = crate::CheckTestNatType::new();
         if socks.proxy.is_empty() {
             Config::set_socks(None);
         } else {
             Config::set_socks(Some(socks));
         }
-        crate::common::test_nat_type();
         crate::RendezvousMediator::restart();
         log::info!("socks updated");
     }
 }
 
 #[inline]
+#[cfg(feature = "flutter")]
 pub fn get_proxy_status() -> bool {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     return ipc::get_proxy_status();
@@ -842,7 +860,7 @@ pub fn video_save_directory(root: bool) -> String {
         {
             let drive = std::env::var("SystemDrive").unwrap_or("C:".to_owned());
             let dir =
-                std::path::PathBuf::from(format!("{drive}\\ProgramData\\RustDesk\\recording",));
+                std::path::PathBuf::from(format!("{drive}\\ProgramData\\{appname}\\recording",));
             return dir.to_string_lossy().to_string();
         }
     }
@@ -857,7 +875,7 @@ pub fn video_save_directory(root: bool) -> String {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     if let Ok(home) = config::APP_HOME_DIR.read() {
         let mut path = home.to_owned();
-        path.push_str("/RustDesk/ScreenRecord");
+        path.push_str(format!("/{appname}/ScreenRecord").as_str());
         let dir = try_create(&std::path::Path::new(&path));
         if !dir.is_empty() {
             return dir;
@@ -1129,15 +1147,11 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
     let mut key_confirmed = false;
     let mut rx = rx;
     let mut mouse_time = 0;
+    #[cfg(feature = "flutter")]
+    let mut video_conn_count = 0;
     #[cfg(not(feature = "flutter"))]
     let mut id = "".to_owned();
-    #[cfg(any(
-        target_os = "windows",
-        all(
-            any(target_os = "linux", target_os = "macos"),
-            feature = "unix-file-copy-paste"
-        )
-    ))]
+    #[cfg(target_os = "windows")]
     let mut enable_file_transfer = "".to_owned();
     let is_cm = crate::common::is_cm();
 
@@ -1164,17 +1178,11 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                 *OPTIONS.lock().unwrap() = v;
                                 *OPTION_SYNCED.lock().unwrap() = true;
 
-                                #[cfg(any(
-                                        target_os = "windows",
-                                        all(
-                                            any(target_os="linux", target_os = "macos"),
-                                            feature = "unix-file-copy-paste"
-                                            )
-                                        ))]
+                                #[cfg(target_os = "windows")]
                                 {
                                     let b = OPTIONS.lock().unwrap().get(OPTION_ENABLE_FILE_TRANSFER).map(|x| x.to_string()).unwrap_or_default();
                                     if b != enable_file_transfer {
-                                        clipboard::ContextSend::enable(option2bool(OPTION_ENABLE_FILE_TRANSFER, &b));
+                                        clipboard::ContextSend::enable(config::option2bool(OPTION_ENABLE_FILE_TRANSFER, &b));
                                         enable_file_transfer = b;
                                     }
                                 }
@@ -1189,8 +1197,9 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                     *TEMPORARY_PASSWD.lock().unwrap() = value;
                                 }
                             }
+                            #[cfg(feature = "flutter")]
                             Ok(Some(ipc::Data::VideoConnCount(Some(n)))) => {
-                                VIDEO_CONN_COUNT.store(n, Ordering::Relaxed);
+                                video_conn_count = n;
                             }
                             Ok(Some(ipc::Data::OnlineStatus(Some((mut x, _c))))) => {
                                 if x > 0 {
@@ -1208,6 +1217,8 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                     mouse_time,
                                     #[cfg(not(feature = "flutter"))]
                                     id: id.clone(),
+                                    #[cfg(feature = "flutter")]
+                                    video_conn_count,
                                 };
                             }
                             _ => {}
@@ -1221,6 +1232,7 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                         c.send(&ipc::Data::Options(None)).await.ok();
                         c.send(&ipc::Data::Config(("id".to_owned(), None))).await.ok();
                         c.send(&ipc::Data::Config(("temporary-password".to_owned(), None))).await.ok();
+                        #[cfg(feature = "flutter")]
                         c.send(&ipc::Data::VideoConnCount(None)).await.ok();
                     }
                 }
@@ -1241,6 +1253,8 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
             mouse_time,
             #[cfg(not(feature = "flutter"))]
             id: id.clone(),
+            #[cfg(feature = "flutter")]
+            video_conn_count,
         };
         sleep(1.).await;
     }
@@ -1280,6 +1294,13 @@ pub async fn change_id_shared(id: String, old_id: String) -> String {
 
 pub async fn change_id_shared_(id: String, old_id: String) -> &'static str {
     if !hbb_common::is_valid_custom_id(&id) {
+        log::debug!(
+            "debugging invalid id: \"{id}\", len: {}, base64: \"{}\"",
+            id.len(),
+            crate::encode64(&id)
+        );
+        let bom = id.trim_start_matches('\u{FEFF}');
+        log::debug!("bom: {}", hbb_common::is_valid_custom_id(&bom));
         return INVALID_FORMAT;
     }
 

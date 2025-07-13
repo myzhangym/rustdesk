@@ -31,17 +31,18 @@ env:
   FLUTTER_ELINUX_VERSION: "3.16.9"
   TAG_NAME: "${{ inputs.upload-tag }}"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-  # vcpkg version: 2024.07.12
-  VCPKG_COMMIT_ID: "1de2026f28ead93ff1773e6e680387643e914ea1"
-  VERSION: "1.3.3"
-  NDK_VERSION: "r27b"
+  # vcpkg version: 2025.01.13
+  # If we change the `VCPKG COMMIT_ID`, please remember:
+  # 1. Call `$VCPKG_ROOT/vcpkg x-update-baseline` to update the baseline in `vcpkg.json`.
+  #  Or we may face build issue like 
+  #  https://github.com/rustdesk/rustdesk/actions/runs/14414119794/job/40427970174
+  # 2. Update the `VCPKG_COMMIT_ID` in `ci.yml` and `playground.yml`.
+  VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
+  VERSION: "1.4.0"
+  NDK_VERSION: "r27c"
   #signing keys env variable checks
   ANDROID_SIGNING_KEY: "${{ secrets.ANDROID_SIGNING_KEY }}"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
-  # To make a custom build with your own servers set the below secret values
-  RS_PUB_KEY: "${{ secrets.RS_PUB_KEY }}"
-  RENDEZVOUS_SERVER: "${{ secrets.RENDEZVOUS_SERVER }}"
-  API_SERVER: "${{ secrets.API_SERVER }}"
   UPLOAD_ARTIFACT: "${{ inputs.upload-artifact }}"
   SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}"
 
@@ -87,6 +88,8 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Restore bridge files
         uses: actions/download-artifact@master
@@ -107,7 +110,6 @@ jobs:
 
       # https://github.com/flutter/flutter/issues/155685
       - name: Replace engine with rustdesk custom flutter engine
-        if: false
         run: |
           flutter doctor -v
           flutter precache --windows
@@ -157,17 +159,48 @@ jobs:
             done
             exit 1
           fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
         shell: bash
 
       - name: Build rustdesk
         run: |
+          # Windows: build RustDesk
+          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          mv ./flutter/build/windows/x64/runner/Release ./rustdesk
+
+          # Download usbmmidd_v2.zip and extract it to ./rustdesk
           Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
           Expand-Archive usbmmidd_v2.zip -DestinationPath .
-          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           Remove-Item -Path usbmmidd_v2\Win32 -Recurse
           Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat"
-          mv ./flutter/build/windows/x64/runner/Release ./rustdesk
           mv -Force .\usbmmidd_v2 ./rustdesk
+
+          # Download printer driver files and extract them to ./rustdesk
+          try {
+            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4.zip -OutFile rustdesk_printer_driver_v4.zip
+            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
+            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/sha256sums -OutFile sha256sums
+
+            # Check and move the files
+            $checksum_driver = (Select-String -Path .\sha256sums -Pattern '^([a-fA-F0-9]{64}) \*rustdesk_printer_driver_v4\.zip$').Matches.Groups[1].Value
+            $downloadsum_driver = Get-FileHash -Path rustdesk_printer_driver_v4.zip -Algorithm SHA256
+            $checksum_dll = (Select-String -Path .\sha256sums -Pattern '^([a-fA-F0-9]{64}) \*printer_driver_adapter\.zip$').Matches.Groups[1].Value
+            $downloadsum_dll = Get-FileHash -Path printer_driver_adapter.zip -Algorithm SHA256
+            if ($checksum_driver -eq $downloadsum_driver.Hash -and $checksum_dll -eq $downloadsum_dll.Hash) {
+                Write-Output "rustdesk_printer_driver_v4, checksums match, extract the file."
+                Expand-Archive rustdesk_printer_driver_v4.zip -DestinationPath .
+                mkdir ./rustdesk/drivers
+                mv -Force .\rustdesk_printer_driver_v4 ./rustdesk/drivers/RustDeskPrinterDriver
+                Expand-Archive printer_driver_adapter.zip -DestinationPath .
+                mv -Force .\printer_driver_adapter.dll ./rustdesk
+            } elseif ($checksum_driver -ne $downloadsum_driver.Hash) {
+                Write-Output "rustdesk_printer_driver_v4, checksums do not match, ignore the file."
+            } else {
+                Write-Output "printer_driver_adapter.dll, checksums do not match, ignore the file."
+            }
+          } catch {
+              Write-Host "Ingore the printer driver error."
+          }
 
       - name: find Runner.res
         # Windows: find Runner.res (compiled from ./flutter/windows/runner/Runner.rc), copy to ./Runner.res
@@ -276,6 +309,8 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install LLVM and Clang
         uses: rustdesk-org/install-llvm-action-32bit@master
@@ -317,6 +352,7 @@ jobs:
             done
             exit 1
           fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
         shell: bash
 
       - name: Build rustdesk
@@ -403,6 +439,8 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Restore bridge files
         uses: actions/download-artifact@master
@@ -412,7 +450,7 @@ jobs:
 
       - name: Build rustdesk
         run: |
-          ./build.py --flutter --hwcodec
+          ./build.py --flutter --hwcodec --unix-file-copy-paste
 
       - name: create unsigned dmg
         if: env.UPLOAD_ARTIFACT == 'true'
@@ -488,6 +526,9 @@ jobs:
           brew install nasm yasm
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
       - name: Install flutter
         uses: subosito/flutter-action@v2
         with:
@@ -520,6 +561,7 @@ jobs:
             done
             exit 1
           fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
         shell: bash
 
       - name: Install Rust toolchain
@@ -544,6 +586,12 @@ jobs:
         run: |
           rustup target add ${{ matrix.job.target }}
           cargo build --features flutter,hwcodec --release --target aarch64-apple-ios --lib
+          
+      - name: Upload liblibrustdesk.a Artifacts
+        uses: actions/upload-artifact@master
+        with:
+          name: liblibrustdesk.a
+          path: target/aarch64-apple-ios/release/liblibrustdesk.a
 
       - name: Build rustdesk
         shell: bash
@@ -586,6 +634,8 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       # $VCPKG_ROOT/vcpkg install --triplet arm64-ios --x-install-root="$VCPKG_ROOT/installed"
 
@@ -638,6 +688,7 @@ jobs:
               os: macos-13, #macos-latest or macos-14 use M1 now, https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners#:~:text=14%20GB-,macos%2Dlatest%20or%20macos%2D14,-The%20macos%2Dlatestlabel
               extra-build-args: "",
               arch: x86_64,
+              vcpkg-triplet: x64-osx,
             }
           - {
               target: aarch64-apple-darwin,
@@ -645,6 +696,7 @@ jobs:
               # extra-build-args: "--disable-flutter-texture-render", # disable this for mac, because we see a lot of users reporting flickering both on arm and x64, and we can not confirm if texture rendering has better performance if htere is no vram, https://github.com/rustdesk/rustdesk/issues/6296
               extra-build-args: "--screencapturekit",
               arch: aarch64,
+              vcpkg-triplet: arm64-osx,
             }
     steps:
       - name: Export GitHub Actions cache environment variables
@@ -656,6 +708,8 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Import the codesign cert
         if: env.MACOS_P12_BASE64 != null
@@ -756,6 +810,7 @@ jobs:
             done
             exit 1
           fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
 
       - name: Show version information (Rust, cargo, Clang)
         shell: bash
@@ -776,7 +831,7 @@ jobs:
             sed -i -e "s/osx_minimum_system_version = \"[0-9]*.[0-9]*\"/osx_minimum_system_version = \"${MIN_MACOS_VERSION}\"/" Cargo.toml
             sed -i -e "s/MACOSX_DEPLOYMENT_TARGET = [0-9]*.[0-9]*;/MACOSX_DEPLOYMENT_TARGET = ${MIN_MACOS_VERSION};/" flutter/macos/Runner.xcodeproj/project.pbxproj
           fi
-          ./build.py --flutter --hwcodec ${{ matrix.job.extra-build-args }}
+          ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.job.extra-build-args }}
 
       - name: create unsigned dmg
         if: env.UPLOAD_ARTIFACT == 'true'
@@ -874,21 +929,21 @@ jobs:
           - {
               arch: aarch64,
               target: aarch64-linux-android,
-              os: ubuntu-20.04,
+              os: ubuntu-24.04,
               reltype: release,
               suffix: "",
             }
           - {
               arch: armv7,
               target: armv7-linux-androideabi,
-              os: ubuntu-20.04,
+              os: ubuntu-24.04,
               reltype: release,
               suffix: "",
             }
           - {
               arch: x86_64,
               target: x86_64-linux-android,
-              os: ubuntu-20.04,
+              os: ubuntu-24.04,
               reltype: release,
               suffix: "",
             }
@@ -925,20 +980,20 @@ jobs:
                libayatana-appindicator3-dev \
                libasound2-dev \
                libc6-dev \
-               libclang-10-dev \
+               libclang-dev \
+               libunwind-dev \
                libgstreamer1.0-dev \
                libgstreamer-plugins-base1.0-dev \
                libgtk-3-dev \
                libpam0g-dev \
                libpulse-dev \
                libva-dev \
-               libvdpau-dev \
                libxcb-randr0-dev \
                libxcb-shape0-dev \
                libxcb-xfixes0-dev \
                libxdo-dev \
                libxfixes-dev \
-               llvm-10-dev \
+               llvm-dev \
                nasm \
                ninja-build \
                openjdk-17-jdk-headless \
@@ -948,6 +1003,9 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
       - name: Install flutter
         uses: subosito/flutter-action@v2
         with:
@@ -1017,23 +1075,13 @@ jobs:
           prefix-key: rustdesk-lib-cache-android # TODO: drop '-android' part after caches are invalidated
           key: ${{ matrix.job.target }}
 
-      - name: fix android for flutter 3.13
-        if: ${{ env.ANDROID_FLUTTER_VERSION == '3.13.9' }}
-        run: |
-          cd flutter
-          sed -i 's/uni_links_desktop/#uni_links_desktop/g' pubspec.yaml
-          sed -i 's/extended_text: .*/extended_text: 11.1.0/' pubspec.yaml
-          flutter pub get
-          cd lib
-          find . | grep dart | xargs sed -i 's/textScaler: TextScaler.linear(\(.*\)),/textScaleFactor: \1,/g'
-
       - name: Build rustdesk lib
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           rustup target add ${{ matrix.job.target }}
-          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }}
+          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
           case ${{ matrix.job.target }} in
             aarch64-linux-android)
               ./flutter/ndk_arm64.sh
@@ -1164,7 +1212,7 @@ jobs:
     needs: [build-rustdesk-android]
     name: build rustdesk android universal apk
     if: ${{ inputs.upload-artifact }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     env:
       reltype: release
       x86_target: "" # can be ",android-x86"
@@ -1202,20 +1250,20 @@ jobs:
                libayatana-appindicator3-dev \
                libasound2-dev \
                libc6-dev \
-               libclang-10-dev \
+               libclang-dev \
+               libunwind-dev \
                libgstreamer1.0-dev \
                libgstreamer-plugins-base1.0-dev \
                libgtk-3-dev \
                libpam0g-dev \
                libpulse-dev \
                libva-dev \
-               libvdpau-dev \
                libxcb-randr0-dev \
                libxcb-shape0-dev \
                libxcb-xfixes0-dev \
                libxdo-dev \
                libxfixes-dev \
-               llvm-10-dev \
+               llvm-dev \
                nasm \
                ninja-build \
                openjdk-17-jdk-headless \
@@ -1225,6 +1273,9 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
       - name: Install flutter
         uses: subosito/flutter-action@v2
         with:
@@ -1266,16 +1317,6 @@ jobs:
         with:
           name: librustdesk.so.i686-linux-android
           path: ./flutter/android/app/src/main/jniLibs/x86
-
-      - name: fix android for flutter 3.13
-        if: ${{ env.ANDROID_FLUTTER_VERSION == '3.13.9' }}
-        run: |
-          cd flutter
-          sed -i 's/uni_links_desktop/#uni_links_desktop/g' pubspec.yaml
-          sed -i 's/extended_text: .*/extended_text: 11.1.0/' pubspec.yaml
-          flutter pub get
-          cd lib
-          find . | grep dart | xargs sed -i 's/textScaler: TextScaler.linear(\(.*\)),/textScaleFactor: \1,/g'
 
       - name: Build rustdesk
         shell: bash
@@ -1362,7 +1403,7 @@ jobs:
               arch: x86_64,
               target: x86_64-unknown-linux-gnu,
               distro: ubuntu18.04,
-              on: ubuntu-20.04,
+              on: ubuntu-22.04,
               deb_arch: amd64,
               vcpkg-triplet: x64-linux,
             }
@@ -1370,7 +1411,7 @@ jobs:
               arch: aarch64,
               target: aarch64-unknown-linux-gnu,
               distro: ubuntu18.04,
-              on: [self-hosted, Linux, ARM64],
+              on: ubuntu-22.04-arm,
               deb_arch: arm64,
               vcpkg-triplet: arm64-linux,
             }
@@ -1383,16 +1424,20 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
       - name: Maximize build space
-        if: ${{ matrix.job.arch == 'x86_64' }}
         run: |
           sudo rm -rf /opt/ghc
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
           sudo apt-get update -y
-          sudo apt-get install -y nasm qemu-user-static
+          sudo apt-get install -y nasm
+          if [[ "${{ matrix.job.arch }}" == "x86_64" ]]; then
+            sudo apt-get install -y qemu-user-static
+          fi
 
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Set Swap Space
         if: ${{ matrix.job.arch == 'x86_64' }}
@@ -1441,7 +1486,7 @@ jobs:
       - name: Install vcpkg dependencies
         if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         run: |
-          sudo apt install -y libva-dev libvdpau-dev
+          sudo apt install -y libva-dev && apt show libva-dev
           if ! $VCPKG_ROOT/vcpkg \
             install \
             --triplet ${{ matrix.job.vcpkg-triplet }} \
@@ -1455,6 +1500,7 @@ jobs:
             done
             exit 1
           fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
         shell: bash
 
       - name: Restore bridge files
@@ -1499,7 +1545,6 @@ jobs:
                libpam0g-dev \
                libpulse-dev \
                libva-dev \
-               libvdpau-dev \
                libxcb-randr0-dev \
                libxcb-shape0-dev \
                libxcb-xfixes0-dev \
@@ -1546,7 +1591,7 @@ jobs:
               export JOBS=""
             fi
             echo $JOBS
-            cargo build --lib $JOBS --features hwcodec,flutter --release
+            cargo build --lib $JOBS --features hwcodec,flutter,unix-file-copy-paste --release
             rm -rf target/release/deps target/release/build
             rm -rf ~/.cargo
 
@@ -1683,7 +1728,6 @@ jobs:
 
   build-rustdesk-linux-sciter:
     if: ${{ inputs.upload-artifact }}
-    needs: build-rustdesk-linux # not for dep, just make it run later for parallelism
     runs-on: ${{ matrix.job.on }}
     name: build-rustdesk-linux-sciter ${{ matrix.job.target }}
     strategy:
@@ -1694,22 +1738,22 @@ jobs:
           - {
               arch: x86_64,
               target: x86_64-unknown-linux-gnu,
-              on: ubuntu-20.04,
+              on: ubuntu-22.04,
               distro: ubuntu18.04,
               deb_arch: amd64,
               sciter_arch: x64,
               vcpkg-triplet: x64-linux,
-              extra_features: ",hwcodec",
+              extra_features: ",hwcodec,unix-file-copy-paste",
             }
           - {
               arch: armv7,
               target: armv7-unknown-linux-gnueabihf,
-              on: [self-hosted, Linux, ARM64],
+              on: ubuntu-22.04-arm,
               distro: ubuntu18.04-rustdesk,
               deb_arch: armhf,
               sciter_arch: arm32,
               vcpkg-triplet: arm-linux,
-              extra_features: "",
+              extra_features: ",unix-file-copy-paste",
             }
     steps:
       - name: Export GitHub Actions cache environment variables
@@ -1721,6 +1765,8 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Free Space
         run: |
@@ -1772,7 +1818,6 @@ jobs:
                libpam0g-dev \
                libpulse-dev \
                libva-dev \
-               libvdpau-dev \
                libxcb-randr0-dev \
                libxcb-shape0-dev \
                libxcb-xfixes0-dev \
@@ -1850,6 +1895,8 @@ jobs:
             cat ~/.cargo/config
             # install dependencies from vcpkg
             export VCPKG_ROOT=/opt/artifacts/vcpkg
+            # remove this when support higher version
+            export USE_AOM_391=1
             if ! $VCPKG_ROOT/vcpkg install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$VCPKG_ROOT/installed"; then
               find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
                 echo "$_1:"
@@ -1860,6 +1907,7 @@ jobs:
               done
               exit 1
             fi
+            head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
             # build rustdesk
             python3 ./res/inline-sciter.py
             export CARGO_INCREMENTAL=0
@@ -1898,7 +1946,7 @@ jobs:
   build-appimage:
     name: Build appimage ${{ matrix.job.target }}
     needs: [build-rustdesk-linux]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     if: ${{ inputs.upload-artifact }}
     strategy:
       fail-fast: false
@@ -1909,6 +1957,8 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Download Binary
         uses: actions/download-artifact@master
@@ -1925,7 +1975,8 @@ jobs:
         run: |
           # install libarchive-tools for bsdtar command used in AppImageBuilder.yml
           sudo apt-get update -y
-          sudo apt-get install -y libarchive-tools
+          # https://github.com/AppImage/AppImageKit/wiki/FUSE
+          sudo apt-get install -y libarchive-tools libfuse2
           # set-up appimage-builder
           pushd /tmp
           wget -O appimage-builder-x86_64.AppImage https://github.com/AppImageCrafters/appimage-builder/releases/download/v1.1.0/appimage-builder-1.1.0-x86_64.AppImage
@@ -1959,14 +2010,14 @@ jobs:
           - {
               target: x86_64-unknown-linux-gnu,
               distro: ubuntu18.04,
-              on: ubuntu-20.04,
+              on: ubuntu-22.04,
               arch: x86_64,
               suffix: "",
             }
           - {
               target: x86_64-unknown-linux-gnu,
               distro: ubuntu18.04,
-              on: ubuntu-20.04,
+              on: ubuntu-22.04,
               arch: x86_64,
               suffix: "-sciter",
             }
@@ -1974,13 +2025,15 @@ jobs:
               target: aarch64-unknown-linux-gnu,
               # try out newer flatpak since error of "error: Nothing matches org.freedesktop.Platform in remote flathub"
               distro: ubuntu22.04,
-              on: [self-hosted, Linux, ARM64],
+              on: ubuntu-22.04-arm,
               arch: aarch64,
               suffix: "",
             }
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Download Binary
         uses: actions/download-artifact@master
@@ -2006,36 +2059,17 @@ jobs:
           shell: /bin/bash
           install: |
             apt-get update -y
-            apt-get install -y \
-               curl \
-               git \
-               rpm \
-               wget
+            apt-get install -y git flatpak flatpak-builder
           run: |
             # disable git safe.directory
             git config --global --add safe.directory "*"
             pushd /workspace
-            # install
-            apt-get update -y
-            apt-get install -y \
-               cmake \
-               curl \
-               flatpak \
-               flatpak-builder \
-               gcc \
-               git \
-               g++ \
-               libgtk-3-dev \
-               nasm \
-               wget
             # flatpak deps
-            flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-            flatpak --user install -y flathub org.freedesktop.Platform/${{ matrix.job.arch }}/23.08
-            flatpak --user install -y flathub org.freedesktop.Sdk/${{ matrix.job.arch }}/23.08
+            flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
             # package
             pushd flatpak
             git clone https://github.com/flathub/shared-modules.git --depth=1
-            flatpak-builder --user --force-clean --repo=repo ./build ./rustdesk.json
+            flatpak-builder --user --install-deps-from=flathub -y --force-clean --repo=repo ./build ./rustdesk.json
             flatpak build-bundle ./repo rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.flatpak com.rustdesk.RustDesk
 
       - name: Publish flatpak package
@@ -2049,7 +2083,7 @@ jobs:
   build-rustdesk-web:
     if: False
     name: build-rustdesk-web
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
     env:
@@ -2057,6 +2091,8 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Prepare env
         run: |

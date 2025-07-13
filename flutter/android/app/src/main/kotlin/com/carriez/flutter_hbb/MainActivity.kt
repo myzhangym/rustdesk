@@ -103,7 +103,6 @@ class MainActivity : FlutterActivity() {
         mainService?.let {
             unbindService(serviceConnection)
         }
-        rdClipboardManager?.rustEnableServiceClipboard(false)
         super.onDestroy()
     }
 
@@ -221,6 +220,10 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
 
                 }
+                "try_sync_clipboard" -> {
+                    rdClipboardManager?.syncClipboard(true)
+                    result.success(true)
+                }
                 GET_START_ON_BOOT_OPT -> {
                     val prefs = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
                     result.success(prefs.getBoolean(KEY_START_ON_BOOT_OPT, false))
@@ -313,7 +316,7 @@ class MainActivity : FlutterActivity() {
                 codecObject.put("mime_type", mime_type)
                 val caps = codec.getCapabilitiesForType(mime_type)
                 if (codec.isEncoder) {
-                    // Encoder‘s max_height and max_width are interchangeable
+                    // Encoder's max_height and max_width are interchangeable
                     if (!caps.videoCapabilities.isSizeSupported(w,h) && !caps.videoCapabilities.isSizeSupported(h,w)) {
                         return@forEach
                     }
@@ -401,14 +404,5 @@ class MainActivity : FlutterActivity() {
     override fun onStart() {
         super.onStart()
         stopService(Intent(this, FloatingWindowService::class.java))
-    }
-
-    // For client side
-    // When swithing from other app to this app, try to sync clipboard.
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            rdClipboardManager?.syncClipboard(true)
-        }
     }
 }

@@ -40,12 +40,13 @@ void _disableAndroidSoftKeyboard({bool? isKeyboardVisible}) {
 }
 
 class RemotePage extends StatefulWidget {
-  RemotePage({Key? key, required this.id, this.password, this.isSharedPassword})
+  RemotePage({Key? key, required this.id, this.password, this.isSharedPassword, this.forceRelay})
       : super(key: key);
 
   final String id;
   final String? password;
   final bool? isSharedPassword;
+  final bool? forceRelay;
 
   @override
   State<RemotePage> createState() => _RemotePageState(id);
@@ -89,6 +90,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       widget.id,
       password: widget.password,
       isSharedPassword: widget.isSharedPassword,
+      forceRelay: widget.forceRelay,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
@@ -145,6 +147,19 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     // The inner logic of `on_voice_call_closed` will check if the voice call is active.
     // Only one client is considered here for now.
     gFFI.chatModel.onVoiceCallClosed("End connetion");
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      trySyncClipboard();
+    }
+  }
+
+  // For client side
+  // When swithing from other app to this app, try to sync clipboard.
+  void trySyncClipboard() {
+    gFFI.invokeMethod("try_sync_clipboard");
   }
 
   @override
@@ -591,7 +606,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                       // ko/zh/ja input method: the button will trigger `onKeyEvent`
                       //                     and the event will not popup if `KeyEventResult.handled` is returned.
                       onChanged: handleSoftKeyboardInput,
-                    ),
+                    ).workaroundFreezeLinuxMint(),
             ),
           ];
           if (showCursorPaint) {
@@ -682,9 +697,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       );
       if (index != null) {
         if (index < mobileActionMenus.length) {
-          mobileActionMenus[index].onPressed.call();
+          mobileActionMenus[index].onPressed?.call();
         } else if (index < mobileActionMenus.length + more.length) {
-          menus[index - mobileActionMenus.length].onPressed.call();
+          menus[index - mobileActionMenus.length].onPressed?.call();
         }
       }
     }();
@@ -757,7 +772,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         elevation: 8,
       );
       if (index != null && index < menus.length) {
-        menus[index].onPressed.call();
+        menus[index].onPressed?.call();
       }
     });
   }
@@ -1254,7 +1269,7 @@ void showOptions(
         title: resolution.child,
         onTap: () {
           close();
-          resolution.onPressed();
+          resolution.onPressed?.call();
         },
       ));
     }
@@ -1266,7 +1281,7 @@ void showOptions(
         title: virtualDisplayMenu.child,
         onTap: () {
           close();
-          virtualDisplayMenu.onPressed();
+          virtualDisplayMenu.onPressed?.call();
         },
       ));
     }

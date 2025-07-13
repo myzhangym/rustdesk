@@ -30,8 +30,15 @@ enum SortBy {
 class JobID {
   int _count = 0;
   int next() {
-    _count++;
-    return _count;
+    String v = bind.mainGetCommonSync(key: 'transfer-job-id');
+    try {
+      return int.parse(v);
+    } catch (e) {
+      // unreachable. But we still handle it to make it safe.
+      // If we return -1, we have to check it in the caller.
+      _count++;
+      return _count;
+    }
   }
 }
 
@@ -259,6 +266,27 @@ class FileModel {
       );
     } catch (e) {
       debugPrint("Failed to decode onSelectedFiles: $e");
+    }
+  }
+
+  void sendEmptyDirs(dynamic obj) {
+    late final List<dynamic> emptyDirs;
+    try {
+      emptyDirs = jsonDecode(obj['dirs'] as String);
+    } catch (e) {
+      debugPrint("Failed to decode sendEmptyDirs: $e");
+    }
+    final otherSideData = remoteController.directoryData();
+    final toPath = otherSideData.directory.path;
+    final isPeerWindows = otherSideData.options.isWindows;
+
+    final isLocalWindows = isWindows || isWebOnWindows;
+    for (var dir in emptyDirs) {
+      if (isLocalWindows != isPeerWindows) {
+        dir = PathUtil.convert(dir, isLocalWindows, isPeerWindows);
+      }
+      var peerPath = PathUtil.join(toPath, dir, isPeerWindows);
+      remoteController.createDirWithRemote(peerPath, true);
     }
   }
 }
@@ -502,8 +530,9 @@ class FileController {
           "path: ${from.path}, toPath: $toPath, to: ${PathUtil.join(toPath, from.name, isWindows)}");
     }
 
-    if (!isLocal &&
-        versionCmp(rootState.target!.ffiModel.pi.version, '1.3.3') < 0) {
+    if (isWeb ||
+        (!isLocal &&
+            versionCmp(rootState.target!.ffiModel.pi.version, '1.3.3') < 0)) {
       return;
     }
 
@@ -1504,6 +1533,12 @@ class PathUtil {
   static List<String> split(String path, bool isWindows) {
     final pathUtil = isWindows ? windowsContext : posixContext;
     return pathUtil.split(path);
+  }
+
+  static String convert(String path, bool isMainWindows, bool isOtherWindows) {
+    final mainPathUtil = isMainWindows ? windowsContext : posixContext;
+    final otherPathUtil = isOtherWindows ? windowsContext : posixContext;
+    return otherPathUtil.joinAll(mainPathUtil.split(path));
   }
 
   static String dirname(String path, bool isWindows) {
